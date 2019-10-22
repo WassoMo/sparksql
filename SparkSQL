@@ -1,0 +1,447 @@
+####################################""
+Create a dataframe
+####################################"
+
+# Load trainsched.txt
+
+df = spark.read.csv("trainsched.txt", header=True)
+
+# Create temporary table called table1
+
+df.createOrReplaceTempView("tale1")
+
+####################################""
+Determine the column names of a table
+####################################"
+
+# Inspect the columns in the table df
+
+spark.sql("DESCRIBE schedule").show()
+
+####################################"
+####################################"
+####################################"
+    Window function SQL
+####################################"
+Running sums using window function SQL
+####################################"
+# Add col running_total that sums diff_min col in each group
+query = """
+SELECT train_id, station, time, diff_min,
+SUM(diff_min) OVER (PARTITION BY train_id ORDER BY time) AS running_total
+FROM schedule
+"""
+
+# Run the query and display the result
+spark.sql(query).show()
+
+####################################"
+Fix the broken query
+####################################"
+query = """
+SELECT 
+ROW_NUMBER() OVER (ORDER BY time) AS row,
+train_id, 
+station, 
+time, 
+LEAD(time,1) OVER (ORDER BY time) AS time_next 
+FROM schedule
+"""
+spark.sql(query).show()
+
+# Give the number of the bad row
+bad_row = 7
+
+# Provide the missing clause
+clause = "PARTITION BY train_id"
+
+####################################"
+####################################"
+Aggregation, step by step
+
+Whether to use dot notation or SQL is a personal preference. 
+However, as demonstrated in the video exercise, there are cases 
+where SQL is simpler. Also as demonstrated in the video lesson, 
+there are also cases where the dot notation gives a counterintuitive 
+result, such as when a second aggregation on a column clobbers a 
+prior aggregation on that column. As mentioned in the video, agg in 
+pyspark is only able to summarize one column at a time.
+####
+# Give the identical result in each command
+
+spark.sql('SELECT train_id, MIN(time) AS start FROM schedule GROUP BY train_id').show()
+df.groupBy('train_id').agg({'time':'min'}).withColumnRenamed('min(time)', 'start').show()
+
+# Print the second column of the result
+
+spark.sql('SELECT train_id, MIN(time), MAX(time) FROM schedule GROUP BY train_id').show()
+result = df.groupBy('train_id').agg({'time':'min', 'time':'max'})
+result.show()
+
+print(result.columns[1])
+
+####################################"
+####################################"
+Aggregating the same column twice
+####################################"
+from pyspark.sql.functions import min, max, col
+expr = [min(col("time")).alias('start'), max(col("time")).alias('end')]
+dot_df = df.groupBy("train_id").agg(*expr)
+dot_df.show()
+
+# Write a SQL query giving a result identical to dot_df
+query = "SELECT train_id, MIN(time) AS start, MAX(time) AS end FROM schedule GROUP BY train_id"
+sql_df = spark.sql(query)
+sql_df.show()
+
+####################################"
+
+Aggregate dot SQL
+
+####################################"
+df = spark.sql("""
+SELECT *, 
+LEAD(time,1) OVER(PARTITION BY train_id ORDER BY time) AS time_next 
+FROM schedule
+""")
+
+# Obtain the identical result using dot notation 
+
+dot_df = df.withColumn('time_next', lead('time', 1)
+        .over(Window.partitionBy('train_id')
+        .orderBy('time')))
+
+####################################"
+
+Convert window function from dot notation to SQL
+
+####################################"
+Note the use of the "unix_timestamp" function, 
+which is equivalent to the "UNIX_TIMESTAMP" SQL function.
+
+window = Window.partitionBy('train_id').orderBy('time')
+dot_df = df.withColumn('diff_min', 
+                    (unix_timestamp(lead('time', 1).over(window),'H:m') 
+                     - unix_timestamp('time', 'H:m'))/60)
+
+
+# Create a SQL query to obtain an identical result to dot_df
+query = """
+SELECT *, 
+(UNIX_TIMESTAMP(LEAD(time, 1) OVER (PARTITION BY train_id ORDER BY time),'H:m') 
+ - UNIX_TIMESTAMP(time, 'H:m'))/60 AS diff_min 
+FROM schedule 
+"""
+sql_df = spark.sql(query)
+sql_df.show()
+
+#########################################################
+#########################################################
+#########################################################
+
+Load Natural Language Text
+
+#########################################################
+
+Loading a dataframe from a parquet file
+
+#########################################################
+
+# Load the dataframe
+df = spark.read.load('sherlock_sentences.parquet')
+
+# Filter and show the first 5 rows
+df.where('id > 70').show(5, truncate=False)
+
+
+
+#########################################################
+
+Split and explode a text column
+
+#########################################################
+
+# Split the clause column into a column called words 
+split_df = clauses_df.select(split('clause', ' ').alias('words'))
+split_df.show(5, truncate=False)
+
+# Explode the words column into a column called word 
+exploded_df = split_df.select(explode('words').alias('word'))
+exploded_df.show(10)
+
+# Count the resulting number of rows in exploded_df
+print("\nNumber of rows: ", exploded_df.count())
+
+#########################################################
+
+Creating context window feature data
+
+#########################################################
+
+# Word for each row, previous two and subsequent two words
+query = """
+SELECT
+part,
+LAG(word, 2) OVER(PARTITION BY part ORDER BY id) AS w1,
+LAG(word, 1) OVER(PARTITION BY part ORDER BY id) AS w2,
+word AS w3,
+LEAD(word, 1) OVER(PARTITION BY part ORDER BY id) AS w4,
+LEAD(word, 2) OVER(PARTITION BY part ORDER BY id) AS w5
+FROM text
+"""
+spark.sql(query).where("part = 12").show(10)
+
+#########################################################
+
+Repartitioning the data
+
+#########################################################
+
+text_df.select('chapter')\
+       .distinct()\
+       .sort('chapter')\
+       .show(truncate=False)
+
+# Repartition text_df into 12 partitions on 'chapter' column
+repart_df = text_df.repartition(12, "chapter")
+
+# Prove that repart_df has 12 partitions
+repart_df.rdd.getNumPartitions()
+
+#########################################################
+#########################################################
+
+Common word sequencies 
+
+#########################################################
+#########################################################
+
+# Find the top 10 sequences of five words
+query = """
+SELECT w1, w2, w3, w4, w5, COUNT(*) AS count FROM (
+   SELECT word AS w1,
+   LEAD(word,1) OVER(PARTITION BY part ORDER BY id) AS w2,
+   LEAD(word,2) OVER(PARTITION BY part ORDER BY id) AS w3,
+   LEAD(word,3) OVER(PARTITION BY part ORDER BY id) AS w4,
+   LEAD(word,4) OVER(PARTITION BY part ORDER BY id) AS w5
+   FROM text
+)
+GROUP BY w1, w2, w3, w4, w5
+ORDER BY count DESC
+LIMIT 10 """
+df = spark.sql(query)
+df.show()
+
+#########################################################
+
+Unique 5-tuples in sorted order
+
+#########################################################
+
+# Unique 5-tuples sorted in descending order
+spark.sql("""
+SELECT DISTINCT w1, w2, w3, w4, w5 FROM (
+   SELECT word AS w1,
+   LEAD(word,1) OVER(PARTITION BY part ORDER BY id ) AS w2,
+   LEAD(word,2) OVER(PARTITION BY part ORDER BY id ) AS w3,
+   LEAD(word,3) OVER(PARTITION BY part ORDER BY id ) AS w4,
+   LEAD(word,4) OVER(PARTITION BY part ORDER BY id ) AS w5
+   FROM text
+)
+ORDER BY w1 DESC, w2 DESC, w3 DESC, w4 DESC, w5 DESC 
+LIMIT 10
+""").show()
+
+#########################################################
+
+Most frequent 3-tuples per chapter
+
+#########################################################
+subquery = """
+SELECT chapter, w1, w2, w3, COUNT(*) as count
+FROM
+(
+    SELECT
+    chapter,
+    word AS w1,
+    LEAD(word, 1) OVER(PARTITION BY chapter ORDER BY id ) AS w2,
+    LEAD(word, 2) OVER(PARTITION BY chapter ORDER BY id ) AS w3
+    FROM text
+)
+GROUP BY chapter, w1, w2, w3
+ORDER BY chapter, count DESC
+"""
+#   Most frequent 3-tuple per chapter
+
+query = """
+SELECT chapter, w1, w2, w3, count FROM
+(
+  SELECT
+  chapter,
+  ROW_NUMBER() OVER (PARTITION BY chapter ORDER BY count DESC) AS row,
+  w1, w2, w3, count
+  FROM ( %s )
+)
+WHERE row = 1
+ORDER BY chapter ASC
+""" % subquery
+
+spark.sql(query).show()
+
+#########################################################
+#########################################################
+
+Caching
+
+#########################################################
+#########################################################
+
+# Unpersists df1 and df2 and initializes a timer
+prep(df1, df2) 
+
+# Cache df1
+df1.cache()
+
+# Run actions on both dataframes
+run(df1, "df1_1st") 
+run(df1, "df1_2nd")
+run(df2, "df2_1st")
+run(df2, "df2_2nd", elapsed=True)
+
+# Prove df1 is cached
+print(df1.is_cached())
+
+
+#########################################################
+
+Practicing caching: the SQL
+
+#########################################################
+
+# Unpersist df1 and df2 and initializes a timer
+
+prep(df1, df2) 
+
+# Persist df2 using memory and disk storage level 
+
+df2.persist(storageLevel=pyspark.StorageLevel.MEMORY_AND_DISK)
+
+# Run actions both dataframes
+
+run(df1, "df1_1st") 
+run(df1, "df1_2nd") 
+run(df2, "df2_1st") 
+run(df2, "df2_2nd", elapsed=True)
+
+
+
+#########################################################
+Caching and uncaching tables
+
+In the lesson we learned that tables can be cached. Whereas a 
+dataframe is cached using a cache or persist operation, a 
+table is cached using a cacheTable operation. 
+#########################################################
+# List the tables
+print("Tables:\n", spark.catalog.listTables())
+
+# Cache table1 and Confirm that it is cached
+spark.catalog.cacheTable('table1')
+print("table1 is cached: ", spark.catalog.isCached('table1'))
+
+# Uncache table1 and confirm that it is uncached
+spark.catalog.uncacheTable('table1')
+print("table1 is cached: ", spark.catalog.isCached('table1'))
+
+
+#########################################################
+
+Logging
+
+#########################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
